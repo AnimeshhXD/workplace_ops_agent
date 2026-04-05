@@ -170,10 +170,17 @@ git clone https://github.com/<your-username>/workplace-ops-agent
 cd workplace-ops-agent
 
 # Install dependencies
+<<<<<<< HEAD
 uv pip install -e .
 
 # Start the environment server
 uvicorn server.app:app --host 0.0.0.0 --port 8000
+=======
+uv pip install -r requirements.txt
+
+# Start the environment server
+uvicorn app:app --host 0.0.0.0 --port 8000
+>>>>>>> bd3b20d535ba861b5e08abef2c5d1ba545731a17
 
 # Validate the environment (requires openenv CLI)
 openenv validate --url http://localhost:8000
@@ -234,6 +241,7 @@ docker run -p 7860:7860 workplace-ops-agent
 
 ```
 .
+<<<<<<< HEAD
 ├── client.py        # Client for interacting with the environment
 ├── inference.py     # Agent loop (oracle + LLM modes)
 ├── Dockerfile
@@ -247,6 +255,17 @@ docker run -p 7860:7860 workplace-ops-agent
     ├── graders.py   # Deterministic graders
     ├── reward.py    # Step-level reward logic
     └── models.py    # Pydantic models for actions and state
+=======
+├── app.py           # FastAPI entrypoint
+├── env.py           # Core environment logic
+├── tasks.py         # Task definitions (easy, medium, hard)
+├── graders.py       # Deterministic graders
+├── reward.py        # Step-level reward logic
+├── models.py        # Pydantic models for actions and state
+├── inference.py     # Agent loop (oracle + LLM modes)
+├── Dockerfile
+└── requirements.txt
+>>>>>>> bd3b20d535ba861b5e08abef2c5d1ba545731a17
 ```
 
 ---
@@ -270,4 +289,9 @@ The following limitations are explicit and intentional:
 - **Explicit ordering constraints:** The hard task requires correct action sequencing. Agents that act greedily or randomly will be penalized, making ordering a measurable skill.
 - **Deterministic evaluation:** Results are fully reproducible. There is no variance from LLM-based graders, which makes this suitable for controlled benchmarking.
 - **Dense learning signal:** Partial step rewards make the environment viable for reinforcement learning experimentation, not just prompted inference evaluation.
+<<<<<<< HEAD
 - **Transparent grading:** Every scoring decision is traceable to a specific check in `graders.py`. There are no opaque scoring components.
+=======
+- **Transparent grading:** Every scoring decision is traceable to a specific check in `graders.py`. There are no opaque scoring components.
+```
+>>>>>>> bd3b20d535ba861b5e08abef2c5d1ba545731a17
