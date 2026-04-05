@@ -1,24 +1,13 @@
+```markdown
+# workplace-ops-agent
 
-# Workplace Ops Agent — OpenEnv Hackathon Submission
-
-An OpenEnv-compatible environment that simulates real workplace operations.  
-An agent manages emails, Slack messages, and calendar events under priority constraints, evaluated using deterministic graders.
+An OpenEnv-compatible environment that simulates a simplified workplace operations scenario. An AI agent manages emails, Slack messages, and calendar events across three difficulty levels, evaluated by fully deterministic graders.
 
 ---
 
 ## Motivation
 
-Workplace operations require handling multiple responsibilities at once:
-
-- Responding to urgent incidents
-- Communicating with clients
-- Managing schedules
-
-These tasks are interdependent and time-sensitive. This environment evaluates whether an agent can:
-
-- Prioritize correctly
-- Take the right action at the right time
-- Produce context-appropriate responses
+Workplace operations require handling multiple concurrent task types with different priorities and dependencies. This environment tests whether an agent can correctly sequence actions, produce contextually appropriate responses, and manage scheduling — using structured observations and a deterministic reward signal.
 
 ---
 
@@ -28,62 +17,67 @@ These tasks are interdependent and time-sensitive. This environment evaluates wh
 |---|---|
 | Environment ID | `workplace-ops-agent` |
 | Interface | OpenEnv (`reset`, `step`, `state`) |
-| Max Steps | Task-dependent |
+| Task Levels | Easy, Medium, Hard |
 | Score Range | `0.0` – `1.0` |
-| Scoring Type | Deterministic |
-| Reproducible | Yes (`seed=42`, oracle available) |
+| Grading | Deterministic |
+| Server | FastAPI + WebSocket |
+| Oracle Baseline | Score = `1.0` on all tasks |
 
 ---
 
 ## Action Space
 
-Each action is a JSON object:
+Each action is a JSON object with the following fields:
 
-```json
-{
-  "type": "string",
-  "target_id": "string",
-  "content": "string or JSON"
-}
-```
+| Field | Type | Description |
+|---|---|---|
+| `type` | string | One of the supported action types (see below) |
+| `target_id` | string | ID of the target entity (email, message, event, or task) |
+| `content` | string or JSON | Reply text, classification label, or scheduling payload |
 
-### Supported actions
+**Supported action types:**
 
-* `classify_email` — classify email (`spam` or `important`)
-* `reply_email` — respond to email
-* `respond_slack` — reply to Slack message
-* `schedule_meeting` — update calendar event
-* `escalate` — escalate issue
-* `complete_task` — mark task done
-
-### Notes
-
-* `schedule_meeting` content must be a JSON string:
-
-  ```json
-  {
-    "title": "...",          // required in hard task
-    "start_iso": "...",
-    "end_iso": "..."
-  }
-  ```
+| Action | Description |
+|---|---|
+| `classify_email` | Assign `spam` or `important` to an email |
+| `reply_email` | Send a text reply to an email |
+| `respond_slack` | Send a text response to a Slack message |
+| `schedule_meeting` | Create or update a calendar event |
+| `escalate` | Escalate a task or incident |
+| `complete_task` | Mark a task as complete |
 
 ---
 
 ## Observation Space
 
-Returned by `state()`:
+State returned by `state()` is a structured dictionary:
 
 ```json
 {
   "emails": [
-    { "id": "...", "subject": "...", "from_address": "...", "priority_tier": "HIGH" }
+    {
+      "id": "string",
+      "subject": "string",
+      "body": "string",
+      "priority_tier": 1
+    }
   ],
   "slack_messages": [
-    { "id": "...", "body": "...", "urgent": true, "priority_tier": "HIGH" }
+    {
+      "id": "string",
+      "text": "string",
+      "urgent": true,
+      "priority_tier": 0
+    }
   ],
   "calendar_events": [
-    { "id": "...", "title": "...", "start_iso": "...", "end_iso": "..." }
+    {
+      "id": "string",
+      "title": "string",
+      "start": "ISO 8601 string",
+      "end": "ISO 8601 string",
+      "attendees": ["string"]
+    }
   ],
   "tasks": [],
   "metadata": {
@@ -94,226 +88,183 @@ Returned by `state()`:
 }
 ```
 
-### Fields
-
-* `priority_tier`: `"LOW" | "MEDIUM" | "HIGH"`
-* `urgent`: indicates incident-level Slack messages
-* `grader_score`: updated after every step
-* `tasks`: may be empty depending on scenario
+- `priority_tier` — Integer indicating urgency; lower values indicate higher priority
+- `urgent` — Boolean flag on Slack messages indicating incident-level severity
+- `grader_score` — Cumulative score updated after each step
+- `tasks` — Optional list of named tasks the agent is expected to complete
 
 ---
 
-## Task Definitions
+## Task Descriptions
 
 ### Easy
 
-* Classify 3 emails
-* No ordering constraints
-* Graded on correctness
-
----
+- Classify 3 emails, each labeled either `spam` or `important`
+- No ordering constraint between actions
+- Graded purely on label correctness
 
 ### Medium
 
-* Resolve calendar conflict
-* Reschedule meeting
-* Notify via Slack
-
----
+- Resolve a scheduling conflict between two calendar events
+- Reschedule one meeting to a non-conflicting time
+- Notify the relevant party via Slack
+- No strict ordering enforced between these actions
 
 ### Hard
 
-Multi-step operations scenario:
+- Handle an urgent production incident flagged in Slack
+- Reply to a client email in a retention scenario
+- Update a calendar event to reflect rescheduled commitments
+- **Strict ordering required:**
+  1. `respond_slack` — incident response
+  2. `reply_email` — client reply
+  3. `schedule_meeting` — calendar update
 
-1. Respond to urgent Slack incident
-2. Reply to high-risk client email
-3. Update calendar
-
-### Constraints
-
-* Strict ordering enforced:
-
-  ```
-  incident → client → calendar
-  ```
-* Acting out of order incurs penalties
-* All actions must meet quality requirements
-
----
-
-## Reward Design
-
-* Dense reward shaping
-* Positive reward for correct actions
-* Penalties for:
-
-  * Incorrect ordering
-  * Low-quality responses
-* Final score aligns with grader output
-* Fully deterministic (no randomness)
+Actions taken out of order are penalized.
 
 ---
 
 ## Grading Logic
 
-All graders are deterministic — no LLM evaluation.
+All grading is deterministic. No LLM-based evaluation is used at any point.
 
-### Easy
+**Easy grader:**
+- Checks each email's assigned label against expected value
+- Score = correct labels / total emails
 
-* Score = correct classifications / total
+**Medium grader:**
+- Validates rescheduled event does not overlap with the conflicting event
+- Checks that a Slack notification was sent to the correct target
 
----
+**Hard grader (all checks must pass for full score):**
 
-### Medium
+| Check | Description |
+|---|---|
+| Action ordering | `respond_slack` before `reply_email` before `schedule_meeting` |
+| Slack content | Reply must contain a minimum set of required keywords |
+| Email content | Reply must contain retention-related keywords |
+| Calendar update | Title and ISO start/end times must match expected values exactly |
 
-* Validates:
-
-  * Calendar conflict resolved
-  * Slack notification sent
-
----
-
-### Hard
-
-Checks:
-
-* Correct action ordering
-* Slack incident reply quality (keyword-based, minimum threshold)
-* Client email quality (required phrases)
-* Exact calendar update (title + time)
-
-Score normalized to `[0, 1]`.
+Partial scores are awarded per completed check. Calendar validation has no fuzzy matching — exact values are required.
 
 ---
 
-## Key Features
+## Reward Design
 
-* **Strict priority enforcement**
-  Acting before resolving critical incidents results in penalties
+The environment uses dense reward shaping:
 
-* **Action trace tracking**
-  Ordering is verified using recorded action history
-
-* **Deterministic evaluation**
-  Same actions always produce same score
-
-* **Multi-domain reasoning**
-  Combines email, Slack, and calendar tasks
-
-* **Oracle baseline**
-  Deterministic solution achieving score = 1.0
+- Partial rewards are given for correct intermediate actions within an episode
+- Penalties are applied for ordering violations on the hard task (e.g., updating the calendar before resolving the incident)
+- Reward logic is aligned with grader logic — there is no hidden scoring mismatch between `step()` rewards and final grader score
+- No stochastic components — identical action sequences always produce identical rewards
 
 ---
 
-## Setup & Run
+## How to Run Locally
 
-### 1. Install dependencies
+**Requirements:** Python 3.10+, `uv`
 
 ```bash
-uv sync
-```
+# Clone the repository
+git clone https://github.com/<your-username>/workplace-ops-agent
+cd workplace-ops-agent
 
----
+# Install dependencies
+uv pip install -r requirements.txt
 
-### 2. Start the server
+# Start the environment server
+uvicorn app:app --host 0.0.0.0 --port 8000
 
-```bash
-python -m uvicorn server.app:app --host 0.0.0.0 --port 8000
-```
-
----
-
-### 3. Validate environment
-
-```bash
-openenv validate
+# Validate the environment (requires openenv CLI)
+openenv validate --url http://localhost:8000
 ```
 
 ---
 
 ## Running Inference
 
-### Oracle (deterministic baseline)
-
-#### Windows (PowerShell)
+**Oracle mode (no API key required, always scores 1.0):**
 
 ```bash
-$env:USE_ORACLE="1"
-$env:TASK="hard"
-python inference.py
+USE_ORACLE=1 python inference.py --url http://localhost:8000 --task hard
 ```
 
-#### Linux / Mac
+**LLM mode (OpenAI-compatible API):**
 
 ```bash
-USE_ORACLE=1 TASK=hard python inference.py
+export OPENAI_API_KEY=your_key_here
+python inference.py --url http://localhost:8000 --task hard
 ```
+
+**Log format produced by `inference.py`:**
+
+```
+[START] task=hard
+[STEP 1] action=respond_slack target=msg_001 reward=0.25
+[STEP 2] action=reply_email target=email_003 reward=0.40
+[STEP 3] action=schedule_meeting target=event_002 reward=0.35
+[END] total_score=1.0
+```
+
+Score is normalized to `[0.0, 1.0]`.
 
 ---
 
-### With OpenAI model
+## Docker Usage
 
 ```bash
-export OPENAI_API_KEY=your_key
-python inference.py
-```
-
----
-
-## Output Format
-
-Example run:
-
-```
-[START]
-task=hard
-env=http://127.0.0.1:8000
-model=gpt-4o-mini
-[STEP]
-step=1
-action={"type":"respond_slack",...}
-reward=0.4
-done=false
-[STEP]
-step=2
-...
-[END]
-success=true
-steps=3
-score=1.0
-```
-
----
-
-## Docker
-
-```bash
+# Build the image
 docker build -t workplace-ops-agent .
+
+# Run the container
 docker run -p 8000:8000 workplace-ops-agent
+```
+
+The Dockerfile uses Python 3.10. The server starts automatically via `uvicorn` on container launch.
+
+If deploying to Hugging Face Spaces, update the port to `7860`:
+
+```bash
+docker run -p 7860:7860 workplace-ops-agent
+```
+
+---
+
+## Project Structure
+
+```
+.
+├── app.py           # FastAPI entrypoint
+├── env.py           # Core environment logic
+├── tasks.py         # Task definitions (easy, medium, hard)
+├── graders.py       # Deterministic graders
+├── reward.py        # Step-level reward logic
+├── models.py        # Pydantic models for actions and state
+├── inference.py     # Agent loop (oracle + LLM modes)
+├── Dockerfile
+└── requirements.txt
 ```
 
 ---
 
 ## Limitations
 
-* Keyword-based grading (not semantic)
-* Fixed scenarios (no procedural generation)
-* Calendar validation requires exact match
-* No multi-turn conversation within a single action
-* No authentication layer
-* Oracle is hardcoded (not learned)
+The following limitations are explicit and intentional:
+
+- **Keyword-based content grading:** Slack and email reply quality is evaluated using keyword matching against a fixed list. Semantically correct responses that use different phrasing may not receive full credit.
+- **Fixed task scenarios:** Tasks are not procedurally generated. Each difficulty level has exactly one canonical scenario.
+- **Exact calendar validation:** Calendar grading checks for exact title strings and ISO 8601 timestamps. Near-correct values do not receive partial credit on this check.
+- **No authentication:** The local server has no API key or access control.
+- **No conversational memory:** The agent has no memory beyond what is present in the current state object. There is no multi-turn dialogue support within a single action.
+- **Oracle is hardcoded:** `USE_ORACLE=1` executes a predetermined correct action sequence. It is a reproducibility baseline, not a learned policy.
 
 ---
 
-## Why This Environment Matters
+## Why This Environment Is Useful
 
-* Tests **priority-based decision making**
-* Requires **correct sequencing**, not just correctness
-* Provides **dense reward signals** for training
-* Fully **reproducible and deterministic**
-* Reflects **real-world operational workflows**
-
+- **Multi-domain task management:** The agent must operate across three distinct task types (email, Slack, calendar) within a single episode, requiring it to interpret heterogeneous state.
+- **Explicit ordering constraints:** The hard task requires correct action sequencing. Agents that act greedily or randomly will be penalized, making ordering a measurable skill.
+- **Deterministic evaluation:** Results are fully reproducible. There is no variance from LLM-based graders, which makes this suitable for controlled benchmarking.
+- **Dense learning signal:** Partial step rewards make the environment viable for reinforcement learning experimentation, not just prompted inference evaluation.
+- **Transparent grading:** Every scoring decision is traceable to a specific check in `graders.py`. There are no opaque scoring components.
 ```
-
----
-
