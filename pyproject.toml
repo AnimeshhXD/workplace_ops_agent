@@ -1,0 +1,30 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-workplace-ops-agent"
+version = "0.1.0"
+description = "Workplace operations agent — email, calendar, Slack, and tasks (OpenEnv)"
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core[core]>=0.2.2",
+    "openai>=1.40.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+server = "workplace_ops_agent.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+package-dir = { "workplace_ops_agent" = ".", "workplace_ops_agent.server" = "server" }
+packages = ["workplace_ops_agent", "workplace_ops_agent.server"]

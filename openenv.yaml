@@ -1,0 +1,55 @@
+spec_version: 1
+name: workplace-ops-agent
+description: >
+  Workplace assistant OpenEnv: email (inbox triage), Slack (incidents and notifications),
+  and calendar (scheduling / de-confliction). Three deterministic tasks (easy / medium / hard)
+  with prioritization on the hard scenario, shaped rewards, and graders in [0, 1].
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+
+tasks:
+  easy:
+    id: easy
+    difficulty: easy
+    summary: Classify three inbox messages as spam vs important (accuracy grader).
+  medium:
+    id: medium
+    difficulty: medium
+    summary: Eliminate overlapping meetings and notify #eng-calendar on Slack.
+  hard:
+    id: hard
+    difficulty: hard
+    summary: >
+      Incident Slack vs client renewal email vs imminent standup; 18-step cap, action-trace
+      order rubric, multi-keyword response checks, and attention-budget shaping.
+
+action_space:
+  type: object
+  description: >
+    Structured workplace action with type, target_id, and optional content
+    (labels, free-text replies, or JSON schedule fields).
+  allowed_types:
+    - classify_email
+    - reply_email
+    - schedule_meeting
+    - respond_slack
+    - complete_task
+    - escalate
+
+observation_space:
+  type: object
+  description: >
+    Multi-modal snapshot — emails, Slack messages, calendar events, optional task list (may be
+    empty), per-item priority_tier (HIGH/MEDIUM/LOW), last_action_result, step budget,
+    and metadata (grader_score, reward_breakdown).
+  fields:
+    - emails
+    - slack_messages
+    - calendar_events
+    - tasks
+    - last_action_result
+    - task_id
+    - step_count
+    - max_steps
