@@ -1,4 +1,13 @@
-```markdown
+---
+title: Workplace Operations Agent
+emoji: 📧
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_file: server/app.py
+pinned: false
+---
+
 # workplace-ops-agent
 
 An OpenEnv-compatible environment that simulates a simplified workplace operations scenario. An AI agent manages emails, Slack messages, and calendar events across three difficulty levels, evaluated by fully deterministic graders.
@@ -289,9 +298,4 @@ The following limitations are explicit and intentional:
 - **Explicit ordering constraints:** The hard task requires correct action sequencing. Agents that act greedily or randomly will be penalized, making ordering a measurable skill.
 - **Deterministic evaluation:** Results are fully reproducible. There is no variance from LLM-based graders, which makes this suitable for controlled benchmarking.
 - **Dense learning signal:** Partial step rewards make the environment viable for reinforcement learning experimentation, not just prompted inference evaluation.
-<<<<<<< HEAD
 - **Transparent grading:** Every scoring decision is traceable to a specific check in `graders.py`. There are no opaque scoring components.
-=======
-- **Transparent grading:** Every scoring decision is traceable to a specific check in `graders.py`. There are no opaque scoring components.
-```
->>>>>>> bd3b20d535ba861b5e08abef2c5d1ba545731a17
