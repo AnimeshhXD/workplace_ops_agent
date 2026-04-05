@@ -294,4 +294,4 @@ The following limitations are explicit and intentional:
 =======
 - **Transparent grading:** Every scoring decision is traceable to a specific check in `graders.py`. There are no opaque scoring components.
 ```
->>>>>>> bd3b20d535ba861b5e08abef2c5d1ba545731a17
+
