@@ -1,7 +1,3 @@
-Here’s your **clean, accurate, no-BS README** — fully aligned with your actual implementation and fixes 👇
-
----
-
 
 # Workplace Ops Agent — OpenEnv Hackathon Submission
 
