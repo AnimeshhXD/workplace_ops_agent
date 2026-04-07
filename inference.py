@@ -257,7 +257,12 @@ def run_episode(
 def main() -> None:
     task = os.environ.get("TASK", "easy")
     use_llm = os.environ.get("USE_ORACLE", "0").lower() not in ("1", "true", "yes")
-    run_episode(task, use_llm=use_llm)
+    try:
+        run_episode(task, use_llm=use_llm)
+    except Exception as e:
+        print("[ERROR]")
+        print(str(e))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

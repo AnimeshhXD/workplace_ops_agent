@@ -27,6 +27,12 @@ app = create_app(
 )
 
 
+@app.get("/health")
+def health_check() -> dict:
+    """Health check endpoint."""
+    return {"status": "ok"}
+
+
 def main(host: str = "0.0.0.0", port: int = 8000) -> None:
     import uvicorn
 
