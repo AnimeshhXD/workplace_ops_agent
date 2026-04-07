@@ -26,6 +26,9 @@ app = create_app(
     max_concurrent_envs=4,
 )
 
+# Remove existing /health route and add our custom one
+app.routes[:] = [route for route in app.routes if not (hasattr(route, 'path') and route.path == '/health')]
+
 
 @app.get("/health")
 def health_check() -> dict:
