@@ -8,11 +8,7 @@ import json
 import logging
 import os
 import sys
-import time
 from typing import Any, Dict, List, Optional
-
-import requests
-from openai import OpenAI
 
 try:
     from workplace_ops_agent.client import WorkplaceOpsEnv
@@ -32,20 +28,6 @@ logging.basicConfig(
 def _env_base() -> str:
     return os.environ.get("OPENENV_BASE_URL") or os.environ.get("ENV_URL") or "http://127.0.0.1:7860"
 
-def wait_for_env(base_url: str, timeout: int = 60) -> bool:
-    """Wait for environment server to be ready by polling /health endpoint."""
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            resp = requests.get(f"{base_url}/health", timeout=5)
-            if resp.status_code == 200:
-                logger.info(f"Environment server ready at {base_url}")
-                return True
-        except requests.RequestException as e:
-            logger.debug(f"Health check failed (will retry): {type(e).__name__}: {e}")
-        time.sleep(2)
-    logger.error(f"Environment server not reachable after {timeout}s at {base_url}")
-    return False
 
 def _oracle_plan(task: str) -> List[Dict[str, Any]]:
     if task == "easy":
@@ -132,55 +114,17 @@ def _summarize_obs(obs: Any) -> str:
     return "\n".join(lines)
 
 
-def _parse_action(raw: str) -> Optional[WorkplaceAction]:
-    """Parse action from raw string with explicit error logging."""
-    raw = raw.strip()
-    if not raw:
-        logger.warning("Action JSON parsing: received empty string")
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Action JSON parsing failed: {e}. Raw: {raw[:200]}")
-        return None
-    
-    if not isinstance(data, dict):
-        logger.warning(f"Action JSON must be dict, got {type(data).__name__}: {str(data)[:100]}")
-        return None
-    
-    try:
-        return WorkplaceAction(
-            type=data["type"],
-            target_id=str(data.get("target_id", "")),
-            content=data.get("content"),
-        )
-    except (KeyError, TypeError, ValueError) as e:
-        logger.warning(f"Action field validation failed: {e}. Data: {str(data)[:200]}")
-        return None
-
-
 def run_episode(
     task: str,
     *,
-    use_llm: bool,
+    use_llm: bool = False,
     max_steps: int = 48,
 ) -> tuple[bool, int, float]:
     base = _env_base()
-    api_base = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-    model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
-    api_key = os.environ.get("OPENAI_API_KEY", "")
 
     print("[START]")
     print(f"task={task}")
     print(f"env={base}")
-    print(f"model={model_name}")
-    client_ai: Optional[OpenAI] = None
-    if use_llm:
-        if not api_key:
-            print("OPENAI_API_KEY missing — falling back to oracle plan.", file=sys.stderr)
-            use_llm = False
-        else:
-            client_ai = OpenAI(api_key=api_key, base_url=api_base)
 
     oracle = _oracle_plan(task)
     oi = 0
@@ -189,15 +133,6 @@ def run_episode(
     done = False
     success = False
     score = 0.0
-
-    if not wait_for_env(base):
-        print("[ERROR]")
-        print("env not reachable")
-        print("[END]")
-        print("success=false")
-        print("steps=0")
-        print("score=0.0")
-        return False, 0, 0.0
 
     try:
         sync_env = WorkplaceOpsEnv(base_url=base).sync()
@@ -214,64 +149,16 @@ def run_episode(
     with sync_env:
         result = sync_env.reset(task=task, seed=42)
         obs = result.observation
-        hist: List[Dict[str, str]] = []
 
         while not done and steps < max_steps:
-            if use_llm and client_ai is not None:
-                system = (
-                    "You are a workplace operations agent. Reply with ONE JSON object only, "
-                    "no markdown, keys: type, target_id, content (string or null). "
-                    "Types: classify_email, reply_email, schedule_meeting, respond_slack, "
-                    "complete_task, escalate. For schedule_meeting content use JSON string "
-                    "with optional title, start_iso, end_iso ISO8601."
-                )
-                user = (
-                    "Pick the single best next action.\n\n"
-                    + _summarize_obs(obs)
-                    + "\n\nConversation (JSON actions you already took):\n"
-                    + json.dumps(hist[-8:], indent=2)
-                )
-                resp = client_ai.chat.completions.create(
-                    model=model_name,
-                    temperature=0.0,
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                )
-                if not resp or not resp.choices:
-                    action = WorkplaceAction(
-                        type="escalate",
-                        target_id="planner",
-                        content="empty response from model",
-                    )
-                else:
-                    msg = resp.choices[0].message
-                    raw = (msg.content or "").strip()
-                    action = _parse_action(raw)
-                    if action is None:
-                        action = WorkplaceAction(
-                            type="escalate",
-                            target_id="planner",
-                            content="could not parse model output",
-                        )
-            else:
-                if oi >= len(oracle):
-                    break
-                row = oracle[oi]
-                oi += 1
-                action = WorkplaceAction(
-                    type=row["type"],
-                    target_id=row["target_id"],
-                    content=row.get("content"),
-                )
-
-            hist.append(
-                {
-                    "type": action.type,
-                    "target_id": action.target_id,
-                    "content": action.content or "",
-                }
+            if oi >= len(oracle):
+                break
+            row = oracle[oi]
+            oi += 1
+            action = WorkplaceAction(
+                type=row["type"],
+                target_id=row["target_id"],
+                content=row.get("content"),
             )
 
             try:
@@ -281,18 +168,17 @@ def run_episode(
                 print("[ERROR]")
                 print(f"step_execution_failed: {type(e).__name__}: {str(e)}")
                 break
+
             obs = result.observation
             r = float(result.reward or 0.0)
             total_reward += r
             done = bool(result.done)
             steps += 1
-            # Prefer grader_score if available, else fallback to normalized reward
-            grader_score = obs.metadata.get("grader_score")
 
+            grader_score = obs.metadata.get("grader_score")
             if grader_score is not None:
                 score = float(grader_score)
             else:
-                # fallback: normalize reward (safe heuristic)
                 score = max(min(total_reward / 3.0, 1.0), 0.0)
 
             print("[STEP]")
@@ -310,6 +196,7 @@ def run_episode(
             )
             print(f"reward={r}")
             print(f"done={str(done).lower()}")
+
         success = done and score >= 0.99
 
     print("[END]")
@@ -321,9 +208,9 @@ def run_episode(
 
 def main() -> None:
     task = os.environ.get("TASK", "easy")
-    use_llm = os.environ.get("USE_ORACLE", "0").lower() not in ("1", "true", "yes")
+    # Always use oracle — no LLM/API key needed
     try:
-        run_episode(task, use_llm=use_llm)
+        run_episode(task, use_llm=False)
     except Exception as e:
         logger.exception(f"Unexpected error in episode: {e}")
         print("[ERROR]")
