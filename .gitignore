@@ -20,3 +20,8 @@ wheels/
 *.egg
 .pytest_cache/
 .coverage
+
+ACTION_PLAN.md
+AUDIT_INDEX.md
+AUDIT_REPORT.md
+AUDIT_SUMMARY.md
