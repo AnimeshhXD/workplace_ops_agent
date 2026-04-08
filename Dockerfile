@@ -21,6 +21,6 @@ ENV PATH="/app/env/.venv/bin:${PATH}"
 EXPOSE 7860
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD sh -c 'curl -fsS "http://127.0.0.1:$${PORT:-7860}/health" || exit 1'
+    CMD sh -c 'curl -fsS "http://127.0.0.1:${PORT:-7860}/health" || exit 1'
 
 CMD ["sh", "-c", "cd /app/env && exec uv run uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-7860}"]

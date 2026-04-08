@@ -4,6 +4,8 @@
 Local dev: ``uvicorn server.app:app --reload`` or call ``main()`` after ``python -m workplace_ops_agent.server.app``.
 """
 
+from typing import Optional
+
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:  # pragma: no cover
@@ -33,19 +35,23 @@ app.routes[:] = [route for route in app.routes if not (hasattr(route, 'path') an
 @app.get("/health")
 def health_check() -> dict:
     """Health check endpoint."""
-    return {"status": "ok"}
+    return {"status": "healthy"}
 
 
-def main(host: str = "0.0.0.0", port: int = 8000) -> None:
+def main(host: str = "0.0.0.0", port: Optional[int] = None) -> None:
+    import os
     import uvicorn
 
+    if port is None:
+        port = int(os.environ.get("PORT", 7860))
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
     import argparse
+    import os
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 7860)))
     args = parser.parse_args()
     main(port=args.port)

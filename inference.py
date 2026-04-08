@@ -7,8 +7,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from typing import Any, Dict, List, Optional
 
+import requests
 from openai import OpenAI
 
 try:
@@ -20,8 +22,20 @@ except ImportError:
 
 
 def _env_base() -> str:
-    return os.environ.get("OPENENV_BASE_URL") or os.environ.get("ENV_URL") or "http://127.0.0.1:8000"
+    return os.environ.get("OPENENV_BASE_URL") or os.environ.get("ENV_URL") or "http://127.0.0.1:7860"
 
+def wait_for_env(base_url: str, timeout: int = 60) -> bool:
+    """Wait for environment server to be ready by polling /health endpoint."""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            resp = requests.get(f"{base_url}/health", timeout=5)
+            if resp.status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
 
 def _oracle_plan(task: str) -> List[Dict[str, Any]]:
     if task == "easy":
@@ -159,7 +173,26 @@ def run_episode(
     success = False
     score = 0.0
 
-    sync_env = WorkplaceOpsEnv(base_url=base).sync()
+    if not wait_for_env(base):
+        print("[ERROR]")
+        print("env not reachable")
+        print("[END]")
+        print("success=false")
+        print("steps=0")
+        print("score=0.0")
+        return False, 0, 0.0
+
+    try:
+        sync_env = WorkplaceOpsEnv(base_url=base).sync()
+    except Exception as e:
+        print("[ERROR]")
+        print(f"env_connection_failed: {str(e)}")
+        print("[END]")
+        print("success=false")
+        print("steps=0")
+        print("score=0.0")
+        return False, 0, 0.0
+
     with sync_env:
         result = sync_env.reset(task=task, seed=42)
         obs = result.observation
@@ -188,14 +221,22 @@ def run_episode(
                         {"role": "user", "content": user},
                     ],
                 )
-                raw = (resp.choices[0].message.content or "").strip()
-                action = _parse_action(raw)
-                if action is None:
+                if not resp or not resp.choices:
                     action = WorkplaceAction(
                         type="escalate",
                         target_id="planner",
-                        content="could not parse model output",
+                        content="empty response from model",
                     )
+                else:
+                    msg = resp.choices[0].message
+                    raw = (msg.content or "").strip()
+                    action = _parse_action(raw)
+                    if action is None:
+                        action = WorkplaceAction(
+                            type="escalate",
+                            target_id="planner",
+                            content="could not parse model output",
+                        )
             else:
                 if oi >= len(oracle):
                     break
@@ -215,7 +256,12 @@ def run_episode(
                 }
             )
 
-            result = sync_env.step(action)
+            try:
+                result = sync_env.step(action)
+            except Exception as e:
+                print("[ERROR]")
+                print(str(e))
+                break
             obs = result.observation
             r = float(result.reward or 0.0)
             total_reward += r
@@ -262,6 +308,10 @@ def main() -> None:
     except Exception as e:
         print("[ERROR]")
         print(str(e))
+        print("[END]")
+        print("success=false")
+        print("steps=0")
+        print("score=0.0")
         sys.exit(1)
 
 

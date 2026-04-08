@@ -196,7 +196,7 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
         tid = self._st.task_id
         if tid == "easy":
             ids = {e["id"] for e in self._st.emails}
-            return ids and ids == set(self._st.email_classifications.keys())
+            return bool(ids and ids == set(self._st.email_classifications.keys()))
         if tid == "medium":
             exp = TASKS["medium"]["expected"]
             body = self._st.slack_replies.get(exp["notify_slack_id"], "").lower()
