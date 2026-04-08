@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -20,6 +21,13 @@ except ImportError:
     from client import WorkplaceOpsEnv
     from models import WorkplaceAction
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr,
+)
+
 
 def _env_base() -> str:
     return os.environ.get("OPENENV_BASE_URL") or os.environ.get("ENV_URL") or "http://127.0.0.1:7860"
@@ -31,10 +39,12 @@ def wait_for_env(base_url: str, timeout: int = 60) -> bool:
         try:
             resp = requests.get(f"{base_url}/health", timeout=5)
             if resp.status_code == 200:
+                logger.info(f"Environment server ready at {base_url}")
                 return True
-        except Exception:
-            pass
+        except requests.RequestException as e:
+            logger.debug(f"Health check failed (will retry): {type(e).__name__}: {e}")
         time.sleep(2)
+    logger.error(f"Environment server not reachable after {timeout}s at {base_url}")
     return False
 
 def _oracle_plan(task: str) -> List[Dict[str, Any]]:
@@ -123,22 +133,29 @@ def _summarize_obs(obs: Any) -> str:
 
 
 def _parse_action(raw: str) -> Optional[WorkplaceAction]:
+    """Parse action from raw string with explicit error logging."""
     raw = raw.strip()
     if not raw:
+        logger.warning("Action JSON parsing: received empty string")
         return None
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.warning(f"Action JSON parsing failed: {e}. Raw: {raw[:200]}")
         return None
+    
     if not isinstance(data, dict):
+        logger.warning(f"Action JSON must be dict, got {type(data).__name__}: {str(data)[:100]}")
         return None
+    
     try:
         return WorkplaceAction(
             type=data["type"],
             target_id=str(data.get("target_id", "")),
             content=data.get("content"),
         )
-    except Exception:
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f"Action field validation failed: {e}. Data: {str(data)[:200]}")
         return None
 
 
@@ -185,8 +202,9 @@ def run_episode(
     try:
         sync_env = WorkplaceOpsEnv(base_url=base).sync()
     except Exception as e:
+        logger.exception(f"Failed to initialize environment client: {e}")
         print("[ERROR]")
-        print(f"env_connection_failed: {str(e)}")
+        print(f"env_connection_failed: {type(e).__name__}: {str(e)}")
         print("[END]")
         print("success=false")
         print("steps=0")
@@ -259,8 +277,9 @@ def run_episode(
             try:
                 result = sync_env.step(action)
             except Exception as e:
+                logger.exception(f"Error during step execution: {e}")
                 print("[ERROR]")
-                print(str(e))
+                print(f"step_execution_failed: {type(e).__name__}: {str(e)}")
                 break
             obs = result.observation
             r = float(result.reward or 0.0)
@@ -306,8 +325,9 @@ def main() -> None:
     try:
         run_episode(task, use_llm=use_llm)
     except Exception as e:
+        logger.exception(f"Unexpected error in episode: {e}")
         print("[ERROR]")
-        print(str(e))
+        print(f"episode_failed: {type(e).__name__}: {str(e)}")
         print("[END]")
         print("success=false")
         print("steps=0")

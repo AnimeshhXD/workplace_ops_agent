@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from typing import Any, Optional
-from uuid import uuid4
+from typing import Any, Dict, Optional, Set
+from uuid import UUID
 
 from openenv.core.env_server.interfaces import Environment
 
+from .anti_exploit import ActionDiversityTracker, adjust_reward_for_anti_exploit
 from .graders import grade, hard_client_email_ok
 from .models import (
     CalendarEventItem,
@@ -22,6 +24,21 @@ from .models import (
 )
 from .reward import compute_step_reward, maybe_completion_bonus
 from .tasks import TASKS, TaskName
+from .validation import ActionValidator, ValidationError
+
+logger = logging.getLogger(__name__)
+
+
+def _deterministic_uuid(task_id: str, seed: int, counter: int) -> str:
+    """
+    Generate deterministic UUID-like string from seed.
+    Same seed + task_id + counter = same result.
+    """
+    import hashlib
+    base = f"{task_id}:{seed}:{counter}"
+    digest = hashlib.sha256(base.encode()).hexdigest()
+    # Format as UUID-like string
+    return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
 
 
 def _fp(action: WorkplaceAction) -> str:
@@ -36,7 +53,8 @@ def _parse_schedule_content(raw: Optional[str]) -> dict[str, str]:
         data = json.loads(raw)
         if isinstance(data, dict):
             return {str(k): str(v) for k, v in data.items()}
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse schedule JSON: {e}")
         pass
     m = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", raw)
     times = re.findall(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", raw)
@@ -71,15 +89,26 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
     def __init__(self) -> None:
         super().__init__()
         self._st = self._blank_state()
+        # ID caches for O(1) lookup (populated at reset)
+        self._email_ids: Set[str] = set()
+        self._slack_ids: Set[str] = set()
+        self._calendar_ids: Set[str] = set()
+        self._task_ids: Set[str] = set()
+        # Action diversity tracking for anti-exploit
+        self._action_tracker = ActionDiversityTracker()
 
     def _blank_state(self) -> WorkplaceState:
         return WorkplaceState(
-            episode_id=str(uuid4()),
+            episode_id="",  # Set deterministically at reset
             step_count=0,
             task_id="easy",
             seed=0,
             max_steps=50,
         )
+
+    def _reset_rubric(self) -> None:
+        """Reset grading internal state (if any). Placeholder for compatibility."""
+        pass
 
     def _load_scenario(self, task_id: TaskName, seed: int) -> None:
         spec = TASKS[task_id]
@@ -109,6 +138,15 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
         self._st.last_action_result = ""
         self._st.last_reward_breakdown = {}
 
+        # Index all valid IDs for O(1) lookup
+        self._email_ids = {e["id"] for e in self._st.emails}
+        self._slack_ids = {s["id"] for s in self._st.slack_messages}
+        self._calendar_ids = {c["id"] for c in self._st.calendar_events}
+        self._task_ids = {t["id"] for t in self._st.tasks}
+
+        # Reset action diversity tracker
+        self._action_tracker = ActionDiversityTracker()
+
     def _state_as_dict(self) -> dict[str, Any]:
         return {
             "email_classifications": dict(self._st.email_classifications),
@@ -123,7 +161,7 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
             "max_steps": self._st.max_steps,
         }
 
-    def _build_observation(self, done: bool, reward: Optional[float]) -> WorkplaceObservation:
+    def _build_observation(self, done: bool, reward: Optional[float], include_debug: bool = False) -> WorkplaceObservation:
         emails = [
             EmailItem(
                 id=e["id"],
@@ -166,6 +204,18 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
             )
             for t in self._st.tasks
         ]
+        
+        # SECURITY FIX: Hide grader_score and reward_breakdown from metadata in production
+        # Agent should NOT be able to reverse-engineer reward function or grading logic
+        metadata = {
+            "episode_id": self._st.episode_id,
+        }
+        
+        # Only include debug info if explicitly requested or in dev mode
+        if include_debug:
+            metadata["grader_score"] = grade(self._st.task_id, self._state_as_dict())
+            metadata["reward_breakdown"] = dict(self._st.last_reward_breakdown)
+        
         return WorkplaceObservation(
             emails=emails,
             slack_messages=slack,
@@ -177,11 +227,7 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
             max_steps=self._st.max_steps,
             done=done,
             reward=reward,
-            metadata={
-                "grader_score": grade(self._st.task_id, self._state_as_dict()),
-                "episode_id": self._st.episode_id,
-                "reward_breakdown": dict(self._st.last_reward_breakdown),
-            },
+            metadata=metadata,
         )
 
     def _overlap_exists(self) -> bool:
@@ -231,89 +277,106 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
         return True
 
     def _execute(self, action: WorkplaceAction) -> tuple[bool, str]:
+        """Execute action with detailed error reporting. Returns (success, detail_message)."""
         success = True
         detail = ""
-        if action.type == "classify_email":
-            ids = {e["id"] for e in self._st.emails}
-            if action.target_id not in ids:
-                success = False
-                detail = "unknown email id"
-            elif not action.content or action.content.lower() not in ("spam", "important"):
-                success = False
-                detail = "label must be spam or important"
-            else:
-                label = action.content.lower()
-                self._st.email_classifications[action.target_id] = label
-                detail = f"{action.target_id}:{label}"
-        elif action.type == "reply_email":
-            ids = {e["id"] for e in self._st.emails}
-            if action.target_id not in ids:
-                success = False
-                detail = "unknown email id"
-            elif not action.content:
-                success = False
-                detail = "empty reply"
-            else:
-                self._st.email_replies[action.target_id] = action.content
-                detail = "reply recorded"
-        elif action.type == "schedule_meeting":
-            ids = {c["id"] for c in self._st.calendar_events}
-            if action.target_id not in ids:
-                success = False
-                detail = "unknown calendar id"
-            else:
-                fields = _parse_schedule_content(action.content)
-                updated = False
-                for c in self._st.calendar_events:
-                    if c["id"] == action.target_id:
-                        if "title" in fields:
-                            c["title"] = fields["title"]
-                        if "start_iso" in fields:
-                            c["start_iso"] = fields["start_iso"]
-                        if "end_iso" in fields:
-                            c["end_iso"] = fields["end_iso"]
-                        detail = "event updated"
-                        updated = True
-                        break
-                if not updated:
+        
+        try:
+            if action.type == "classify_email":
+                ids = {e["id"] for e in self._st.emails}
+                if action.target_id not in ids:
                     success = False
-                    detail = "event not found"
-        elif action.type == "respond_slack":
-            ids = {s["id"] for s in self._st.slack_messages}
-            if action.target_id not in ids:
-                success = False
-                detail = "unknown slack id"
-            elif not action.content:
-                success = False
-                detail = "empty slack response"
+                    detail = "unknown email id"
+                elif not action.content or action.content.lower() not in ("spam", "important"):
+                    success = False
+                    detail = "label must be spam or important"
+                else:
+                    label = action.content.lower()
+                    self._st.email_classifications[action.target_id] = label
+                    self._action_tracker.record_classification(action.target_id, label)
+                    detail = f"{action.target_id}:{label}"
+            
+            elif action.type == "reply_email":
+                ids = {e["id"] for e in self._st.emails}
+                if action.target_id not in ids:
+                    success = False
+                    detail = "unknown email id"
+                elif not action.content:
+                    success = False
+                    detail = "empty reply"
+                else:
+                    self._st.email_replies[action.target_id] = action.content
+                    detail = "reply recorded"
+            
+            elif action.type == "schedule_meeting":
+                ids = {c["id"] for c in self._st.calendar_events}
+                if action.target_id not in ids:
+                    success = False
+                    detail = "unknown calendar id"
+                else:
+                    fields = _parse_schedule_content(action.content)
+                    updated = False
+                    for c in self._st.calendar_events:
+                        if c["id"] == action.target_id:
+                            if "title" in fields:
+                                c["title"] = fields["title"]
+                            if "start_iso" in fields:
+                                c["start_iso"] = fields["start_iso"]
+                            if "end_iso" in fields:
+                                c["end_iso"] = fields["end_iso"]
+                            detail = "event updated"
+                            updated = True
+                            break
+                    if not updated:
+                        success = False
+                        detail = "event not found"
+            
+            elif action.type == "respond_slack":
+                ids = {s["id"] for s in self._st.slack_messages}
+                if action.target_id not in ids:
+                    success = False
+                    detail = "unknown slack id"
+                elif not action.content:
+                    success = False
+                    detail = "empty slack response"
+                else:
+                    self._st.slack_replies[action.target_id] = action.content
+                    self._st.task_completion_order.append(action.target_id)
+                    detail = "slack response recorded"
+            
+            elif action.type == "complete_task":
+                ids = {t["id"] for t in self._st.tasks}
+                if action.target_id not in ids:
+                    success = False
+                    detail = "unknown task id"
+                else:
+                    for t in self._st.tasks:
+                        if t["id"] == action.target_id:
+                            t["status"] = "done"
+                            break
+                    if action.target_id not in self._st.completed_task_ids:
+                        self._st.completed_task_ids.append(action.target_id)
+                    self._st.task_completion_order.append(action.target_id)
+                    detail = "task marked done"
+            
+            elif action.type == "escalate":
+                if not action.target_id:
+                    success = False
+                    detail = "missing target"
+                else:
+                    self._st.escalations[action.target_id] = action.content or "escalated"
+                    detail = "escalation logged"
+            
             else:
-                self._st.slack_replies[action.target_id] = action.content
-                self._st.task_completion_order.append(action.target_id)
-                detail = "slack response recorded"
-        elif action.type == "complete_task":
-            ids = {t["id"] for t in self._st.tasks}
-            if action.target_id not in ids:
                 success = False
-                detail = "unknown task id"
-            else:
-                for t in self._st.tasks:
-                    if t["id"] == action.target_id:
-                        t["status"] = "done"
-                        break
-                if action.target_id not in self._st.completed_task_ids:
-                    self._st.completed_task_ids.append(action.target_id)
-                self._st.task_completion_order.append(action.target_id)
-                detail = "task marked done"
-        elif action.type == "escalate":
-            if not action.target_id:
-                success = False
-                detail = "missing target"
-            else:
-                self._st.escalations[action.target_id] = action.content or "escalated"
-                detail = "escalation logged"
-        else:
+                detail = "unsupported action"
+        
+        except Exception as e:
+            # Catch any unexpected errors and report them instead of crashing
+            logger.exception(f"Error executing action {action.type}: {e}")
             success = False
-            detail = "unsupported action"
+            detail = f"internal error: {type(e).__name__}"
+        
         return success, detail
 
     def reset(
@@ -329,7 +392,9 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
         task_id: TaskName = task_raw  # type: ignore[assignment]
         s = int(seed or 0)
         self._st = self._blank_state()
-        self._st.episode_id = episode_id or str(uuid4())
+        
+        # Use deterministic UUID based on seed + task
+        self._st.episode_id = episode_id or _deterministic_uuid(task_id, s, 0)
         self._st.step_count = 0
         self._load_scenario(task_id, s)
         self._st.last_action_result = (
@@ -343,7 +408,37 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
         timeout_s: Optional[float] = None,
         **kwargs: Any,
     ) -> WorkplaceObservation:
+        """Execute one step with strict validation and anti-exploit measures."""
         _ = timeout_s
+        
+        # ========== STRICT ACTION VALIDATION ==========
+        validation_err, validated_action = ActionValidator.validate_action(
+            action,
+            task_id=self._st.task_id,
+            valid_email_ids=self._email_ids,
+            valid_slack_ids=self._slack_ids,
+            valid_calendar_ids=self._calendar_ids,
+            valid_task_ids=self._task_ids,
+        )
+        
+        if validation_err:
+            # Return safe observation with error message, no state change
+            self._st.step_count += 1
+            self._st.last_action_result = f"validation error: {validation_err.message}"
+            logger.warning(f"Action validation failed: {validation_err.code} - {validation_err.message}")
+            
+            obs = self._build_observation(done=False, reward=-0.5)
+            obs.metadata["info"] = {
+                "success": False,
+                "detail": validation_err.message,
+                "error_code": validation_err.code,
+                "validation_error": True,
+            }
+            return self._apply_transform(obs)
+        
+        action = validated_action  # Use validated action
+        
+        # ========== EXECUTION & STATE TRACKING ==========
         prev = self._state_as_dict()
         fp = _fp(action)
         dup = bool(
@@ -362,15 +457,16 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
 
         urgent_charge = self._urgent_violation(action) and not self._st.urgent_penalty_applied
 
+        # Execute action
         success, detail = self._execute(action)
         self._st.action_trace.append(
             {"type": action.type, "target_id": action.target_id, "ok": success}
         )
 
         self._st.last_action_result = detail if success else f"error: {detail}"
-
         self._st.step_count += 1
 
+        # ========== MILESTONE PENALTIES ==========
         exp_hard = TASKS["hard"]["expected"] if self._st.task_id == "hard" else {}
         delay_fire = False
         if self._st.task_id == "hard" and not self._st.delay_high_penalty_applied:
@@ -409,6 +505,7 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
         if self._st.task_id == "hard" and self._st.step_count > budget:
             att_steps = 1
 
+        # ========== COMPUTE BASE REWARD ==========
         reward, breakdown = compute_step_reward(
             task_id=self._st.task_id,
             action_type=action.type,
@@ -425,9 +522,26 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
             priority_bonus_fire=prio_bonus,
             attention_overage_steps=att_steps,
         )
+        
         if urgent_charge:
             self._st.urgent_penalty_applied = True
 
+        # ========== ANTI-EXPLOIT ADJUSTMENT ==========
+        # Track action for diversity analysis
+        self._action_tracker.record_action(action.type, action.target_id, success, reward)
+        
+        # Apply anti-exploit penalties
+        reward = adjust_reward_for_anti_exploit(
+            reward,
+            self._action_tracker,
+            action.type,
+            action.target_id,
+            success,
+            self._st.task_id,
+        )
+        breakdown["anti_exploit_adjusted"] = reward
+
+        # ========== COMPLETION BONUS ==========
         done = self._st.step_count >= self._st.max_steps or self._natural_done()
         bonus, applied = maybe_completion_bonus(
             self._st.task_id,
@@ -446,6 +560,7 @@ class WorkplaceOpsEnvironment(Environment[WorkplaceAction, WorkplaceObservation,
             "detail": detail,
             "duplicate_action": dup,
             "repeat_streak": self._st.repeat_streak,
+            "anti_exploit_adjusted": True,
         }
         return self._apply_transform(obs)
 
